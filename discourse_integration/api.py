@@ -1,203 +1,94 @@
 # discourse_integration/api.py
-
 import requests
+import logging
 from django.conf import settings
-from django.contrib.auth import get_user_model
-from django.utils import timezone
+from django.contrib.auth import get_user_model # Import get_user_model to access its manager
+from urllib.parse import urlencode
 
-User = get_user_model()
-
-class DiscourseAPIError(Exception):
-    """Custom exception for Discourse API errors."""
-    pass
+logger = logging.getLogger(__name__)
 
 class DiscourseAPI:
     def __init__(self):
-        self.base_url = settings.DISCOURSE_BASE_URL
+        self.base_url = settings.DISCOURSE_BASE_URL.rstrip('/')
         self.api_key = settings.DISCOURSE_API_KEY
         self.api_username = settings.DISCOURSE_API_USERNAME
         self.headers = {
             'Api-Key': self.api_key,
             'Api-Username': self.api_username,
-            'Content-Type': 'application/json', # Most API calls expect JSON
-            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
         }
+        # Use verify_ssl based on DEBUG setting, allowing for self-signed certs in dev
+        self.verify_ssl = not settings.DEBUG
 
-    def _request(self, method, endpoint, data=None, params=None):
-        url = f'{self.base_url}{endpoint}'
+    def _make_request(self, method, path, data=None, params=None):
+        url = f"{self.base_url}/{path}"
         try:
-            response = requests.request(method, url, json=data, params=params, headers=self.headers, verify=False, timeout=30)
-            response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+            response = requests.request(
+                method,
+                url,
+                json=data,
+                params=params,
+                headers=self.headers,
+                verify=self.verify_ssl # Use the setting for verification
+            )
+            response.raise_for_status()  # Raise an exception for HTTP errors (4xx or 5xx)
             return response.json()
         except requests.exceptions.RequestException as e:
-            raise DiscourseAPIError(f"Discourse API request failed: {e}")
-        except Exception as e:
-            raise DiscourseAPIError(f"An unexpected error occurred during Discourse API call: {e}")
+            logger.error(f"Discourse API request failed: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Discourse API response content: {e.response.text}")
+            raise
 
-    def create_user(self, email, username, external_id, name=None, password=None, active=True, **kwargs):
-        """Creates a user in Discourse."""
-        endpoint = '/users'
-        payload = {
-            'email': email,
-            'username': username,
-            'external_id': str(external_id), # Ensure external_id is a string
-            'name': name or username,
-            'password': password, # Consider implications of setting passwords this way
-            'active': active,
-            'suppress_welcome_message': True, # Avoid welcome email from Discourse
-            **kwargs
+    def create_user(self, user):
+        """
+        Creates a user in Discourse.
+        Requires username, email, and a password (even if random for SSO-managed users).
+        """
+        # Correctly generate a random password using the User model's default manager
+        random_password = get_user_model().objects.make_random_password()
+
+        data = {
+            'username': user.username,
+            'name': user.get_full_name() or user.username,
+            'email': user.email,
+            'password': random_password, # Provide a random password for Discourse
+            'active': True, # Mark user as active
+            'approved': True, # Mark user as approved
+            # 'external_id': user.id, # Highly recommended for linking Django user to Discourse
+            # 'sso_true': True # Some APIs might need this to indicate SSO-managed, but usually implied by SSO
         }
-        # Remove None values
-        payload = {k: v for k, v in payload.items() if v is not None}
-        return self._request('POST', endpoint, data=payload)
+        return self._make_request('POST', 'users', data=data)
 
-    def update_user(self, discourse_user_id, **kwargs):
-        """Updates a user in Discourse."""
-        endpoint = f'/users/{discourse_user_id}'
-        payload = {
-            # Add fields to update, e.g.:
-            # 'email': email,
-            # 'username': username,
-            # 'name': name,
-            # 'user_fields': { 'field_id': 'value' },
-            **kwargs
+    def update_user(self, user):
+        """
+        Updates an existing user in Discourse by username or external_id.
+        """
+        # For updates, it's best to use an external_id if you store it.
+        # If not, you might need to query Discourse by email/username first to get their ID.
+        # For simplicity here, we assume username is unique and directly usable for update endpoint.
+        user_id_or_username = user.username
+
+        data = {
+            'email': user.email,
+            'name': user.get_full_name() or user.username,
+            # Passwords are not typically updated via general user update API for SSO users.
         }
-        # Remove None values
-        payload = {k: v for k, v in payload.items() if v is not None}
-        return self._request('PUT', endpoint, data=payload)
-
-    def get_user_by_external_id(self, external_id):
-        """Gets a user from Discourse by external_id."""
-        endpoint = f'/users/by-external/{external_id}.json'
-        try:
-            return self._request('GET', endpoint)
-        except DiscourseAPIError as e:
-            # Handle 404 specifically if the user is not found
-            if '404 Client Error: Not Found' in str(e): # Check for specific 404 message
-                return None
-            raise # Re-raise other API errors
-
-    def delete_user(self, discourse_user_id, **kwargs):
-        """Deletes a user in Discourse."""
-        endpoint = f'/admin/users/{discourse_user_id}.json'
-        payload = {
-            # 'block_email': True,
-            # 'block_urls': True,
-            # 'delete_posts': True,
-            **kwargs
-        }
-        # Remove None values
-        payload = {k: v for k, v in payload.items() if v is not None}
-        return self._request('DELETE', endpoint, data=payload)
+        # Discourse's update user endpoint typically looks like PUT /u/{username} or /admin/users/{id}
+        # If the direct /users/{username} PUT endpoint exists and works for your Discourse version:
+        return self._make_request('PUT', f'users/{user_id_or_username}', data=data)
 
 
-discourse_api = DiscourseAPI() # Initialize the API client
-
-def sync_user_to_discourse_directly(user_id):
-    """
-    Synchronizes a Django user's data to Discourse directly (blocking operation).
-    Creates the user in Discourse if they don't exist, or updates them.
-    """
-    from .models import DiscourseProfile # Import here to avoid circular dependency
-
-    try:
-        user = User.objects.get(id=user_id)
-        # Do not sync admin users
-        if user.is_staff or user.is_superuser:
-            print(f"Skipping direct sync for admin user: {user.username}")
-            return
-
-        profile, created = DiscourseProfile.objects.get_or_create(user=user)
-
-        # Use Django user ID as the external_id
-        external_id = str(user.id)
-
-        discourse_user_id = profile.discourse_user_id
-
-        if discourse_user_id:
-            # User exists in Discourse, attempt to update
-            print(f"Attempting to update Discourse user ID {discourse_user_id} for Django user {user.username}")
-            try:
-                # Fetch the Discourse user by external_id to confirm existence and get latest data
-                discourse_user_data = discourse_api.get_user_by_external_id(external_id)
-
-                if discourse_user_data:
-                     # Update the user in Discourse
-                     update_payload = {
-                         'email': user.email,
-                         'username': user.username,
-                         'name': user.get_full_name() or user.username,
-                         'active': user.is_active, # Sync active status
-                     }
-                     discourse_api.update_user(discourse_user_id, **update_payload)
-                     print(f"Successfully updated Discourse user ID {discourse_user_id}.")
-                else:
-                    # User not found in Discourse despite having a discourse_user_id in profile
-                    # This might happen if the user was deleted in Discourse directly.
-                    # Attempt to re-create the user in Discourse.
-                    print(f"Discourse user with external_id {external_id} not found. Attempting to re-create.")
-                    profile.discourse_user_id = None # Reset discourse_user_id
-                    profile.save()
-                    # Recursively call to trigger creation logic
-                    sync_user_to_discourse_directly(user.id)
-                    return
-
-
-            except DiscourseAPIError as e:
-                print(f"Error updating Discourse user {user.username} (ID: {discourse_user_id}): {e}")
-                # For direct sync, you might want more robust error handling or logging here
-                # as there's no retry mechanism like Celery.
-                pass # Continue execution, but error is logged
-
-        else:
-            # User does not exist in Discourse, attempt to create
-            print(f"Attempting to create Discourse user for Django user {user.username}")
-            try:
-                # Check if a user with this external_id already exists in Discourse
-                existing_discourse_user = discourse_api.get_user_by_external_id(external_id)
-
-                if existing_discourse_user:
-                    # User exists in Discourse with this external_id, link the profile
-                    discourse_user_id = existing_discourse_user.get('id')
-                    profile.discourse_user_id = discourse_user_id
-                    profile.save()
-                    print(f"Linked existing Discourse user ID {discourse_user_id} to Django user {user.username}.")
-                    # Optionally trigger an update to sync latest data
-                    sync_user_to_discourse_directly(user.id) # Call again to sync latest data
-                    return
-                else:
-                    # Create the user in Discourse
-                    create_payload = {
-                        'email': user.email,
-                        'username': user.username,
-                        'external_id': external_id,
-                        'name': user.get_full_name() or user.username,
-                        'active': user.is_active, # Sync active status
-                        'password': User.objects.make_random_password(), # Set a random password
-                        'suppress_welcome_message': True, # Avoid welcome email from Discourse
-                    }
-                    discourse_user_data = discourse_api.create_user(**create_payload)
-                    discourse_user_id = discourse_user_data.get('id')
-
-                    if discourse_user_id:
-                        profile.discourse_user_id = discourse_user_id
-                        profile.save()
-                        print(f"Successfully created Discourse user ID {discourse_user_id} for Django user {user.username}.")
-                    else:
-                        # Creation failed, log the response
-                        print(f"Discourse user creation failed for {user.username}. Response: {discourse_user_data}")
-                        pass # Continue execution, but error is logged
-
-            except DiscourseAPIError as e:
-                print(f"Error creating Discourse user for {user.username}: {e}")
-                pass # Continue execution, but error is logged
-
-        # Update last synced timestamp
-        profile.last_synced_at = timezone.now()
-        profile.save()
-
-    except User.DoesNotExist:
-        print(f"Django user with ID {user_id} not found for direct sync.")
-    except Exception as e:
-        print(f"An unexpected error occurred during direct sync for user ID {user_id}: {e}")
-        pass # Continue execution, but error is logged
+    def get_sso_login_url(self, return_path='/'):
+        """
+        Generates the Discourse SSO login URL.
+        NOTE: This is a simplified placeholder. Actual SSO payload generation
+        is complex, involving nonce, external_id, email, username, etc.,
+        base64 encoding, and HMAC-SHA256 signature.
+        You would typically use a library like `discourse_sso` for this.
+        """
+        sso_secret = settings.DISCOURSE_SSO_SECRET
+        # Placeholder for actual SSO payload and signature logic
+        sso_payload_base64 = "YOUR_SSO_PAYLOAD_BASE64_ENCODED"
+        signature = "YOUR_HMAC_SHA256_SIGNATURE"
+        return f"{settings.DISCOURSE_SSO_LOGIN_URL}?sso={sso_payload_base64}&sig={signature}"

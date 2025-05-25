@@ -9,12 +9,13 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 # Determine the environment type from DJANGO_SETTINGS_MODULE
 # This needs to happen *before* initializing env if we want to load specific .env files
 # Default to 'development' if DJANGO_SETTINGS_MODULE is not explicitly set
-settings_module_name = os.environ.get('DJANGO_SETTINGS_MODULE', 'your_project.settings.development')
+settings_module_name = os.environ.get('DJANGO_SETTINGS_MODULE', 'gemsso.settings.development')
 ENV_TYPE = settings_module_name.split('.')[-1] # Extracts 'development' or 'production'
 
 # Initialize django-environ
+# Define type conversion and default values for environment variables
 env = environ.Env(
-    # Define type conversion and default values
+    # Basic Django settings
     DEBUG=(bool, False),
     SECRET_KEY=(str), # SECRET_KEY must be provided
     ALLOWED_HOSTS=(list, []), # ALLOWED_HOSTS is a list
