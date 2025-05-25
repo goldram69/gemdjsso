@@ -26,7 +26,7 @@ class DiscourseAPI:
     def _request(self, method, endpoint, data=None, params=None):
         url = f'{self.base_url}{endpoint}'
         try:
-            response = requests.request(method, url, json=data, params=params, headers=self.headers)
+            response = requests.request(method, url, json=data, params=params, headers=self.headers, verify=False, timeout=30)
             response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
             return response.json()
         except requests.exceptions.RequestException as e:

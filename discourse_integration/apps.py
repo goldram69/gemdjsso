@@ -6,4 +6,5 @@ class DiscourseIntegrationConfig(AppConfig):
     verbose_name = 'Discourse Integration'
 
     def ready(self):
-        import discourse_integration.signals # Import signals
+        # Import signals
+        import discourse_integration.signals # noqa: F401 
