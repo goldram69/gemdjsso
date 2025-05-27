@@ -1,14 +1,27 @@
 # discourse_integration/api.py
 import requests
 import logging
+import secrets
+import string
 from django.conf import settings
 from django.contrib.auth import get_user_model # Import get_user_model to access its manager
-from urllib.parse import urlencode
+
+print(f"DEBUG: Loading api.py from: {__file__}") # ADD THIS LINE
 
 logger = logging.getLogger(__name__)
 
+def generate_random_password(length=12):
+    """
+    Generates a cryptographically secure random password.
+    Replaces deprecated BaseUserManager.make_random_password().
+    """
+    alphabet = string.ascii_letters + string.digits + string.punctuation
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
+
 class DiscourseAPI:
     def __init__(self):
+        print("DEBUG: DiscourseAPI __init__ called.") # ADD THIS LINE
+        print(f"DEBUG: DiscourseAPI instance created from: {__file__}") # ADD THIS LINE
         self.base_url = settings.DISCOURSE_BASE_URL.rstrip('/')
         self.api_key = settings.DISCOURSE_API_KEY
         self.api_username = settings.DISCOURSE_API_USERNAME
@@ -30,7 +43,8 @@ class DiscourseAPI:
                 json=data,
                 params=params,
                 headers=self.headers,
-                verify=self.verify_ssl # Use the setting for verification
+                verify=self.verify_ssl, # Use the setting for verification
+                timeout=10
             )
             response.raise_for_status()  # Raise an exception for HTTP errors (4xx or 5xx)
             return response.json()
@@ -41,23 +55,34 @@ class DiscourseAPI:
             raise
 
     def create_user(self, user):
+        print(f"DEBUG: create_user method called for user: {user.username}") # ADD THIS LINE
         """
         Creates a user in Discourse.
         Requires username, email, and a password (even if random for SSO-managed users).
         """
-        # Correctly generate a random password using the User model's default manager
-        random_password = get_user_model().objects.make_random_password()
+        # Generate a random password using the new helper function
+        random_password = generate_random_password()
+        print("DEBUG: Random password generated successfully using secrets module.") # Keep for debugging
+
+        # --- MODIFIED: Ensure email is not empty ---
+        user_email = user.email
+        if not user_email:
+            # Provide a fallback email if the user's email is empty
+            # You might want to log a warning here as well
+            user_email = f"{user.username}@example.com" # Or any other valid placeholder
+            logger.warning(f"User {user.username} has no email. Using placeholder: {user_email}")
 
         data = {
             'username': user.username,
             'name': user.get_full_name() or user.username,
-            'email': user.email,
+            'email': user_email,
             'password': random_password, # Provide a random password for Discourse
             'active': True, # Mark user as active
             'approved': True, # Mark user as approved
             # 'external_id': user.id, # Highly recommended for linking Django user to Discourse
             # 'sso_true': True # Some APIs might need this to indicate SSO-managed, but usually implied by SSO
         }
+        print(f"DEBUG: Attempting _make_request for user creation with data: {data}") # ADD THIS LINE
         return self._make_request('POST', 'users', data=data)
 
     def update_user(self, user):

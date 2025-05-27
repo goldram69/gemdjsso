@@ -7,6 +7,8 @@ from django.contrib.auth import get_user_model
 #from .api import sync_user_to_discourse_directly # Import the direct sync function
 from .api import DiscourseAPI # Import your API wrapper
 
+print(f"DEBUG: Loading signals.py from: {__file__}") # ADD THIS LINE
+
 # Import your Discourse API wrapper (we'll assume one exists or will be created)
 # For now, we'll just log, but this is where your API calls would go.
 # from .api import DiscourseAPI
@@ -16,10 +18,7 @@ User = get_user_model()
 
 @receiver(post_save, sender=User)
 def user_post_save_handler(sender, instance, created, **kwargs):
-    """
-    Handles post_save signal for Django User model.
-    Synchronizes user to Discourse, but skips superusers.
-    """
+    print(f"DEBUG: user_post_save_handler triggered for user: {instance.username}") # ADD THIS LINE
     # Prevent synchronization for Django superusers
     if instance.is_staff or instance.is_superuser:
         logger.info(f"Skipping Discourse sync for superuser or staff: {instance.username}")
@@ -31,6 +30,7 @@ def user_post_save_handler(sender, instance, created, **kwargs):
         return
 
     try:
+        print(f"DEBUG: Attempting to instantiate DiscourseAPI for user: {instance.username}") # ADD THIS LINE
         discourse_api = DiscourseAPI()
         if created:
             logger.info(f"Attempting to create Discourse user for Django user {instance.username}")
@@ -43,3 +43,4 @@ def user_post_save_handler(sender, instance, created, **kwargs):
 
     except Exception as e:
         logger.error(f"An unexpected error occurred during direct sync for user ID {instance.id}: {e}")
+        print(f"DEBUG: Error caught in signal handler: {e}") # ADD THIS LINE
