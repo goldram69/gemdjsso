@@ -68,7 +68,8 @@ class DiscourseAPI:
             logger.error("Discourse API request failed: %s", e) # Use lazy formatting for logging
             if hasattr(e, 'response') and e.response is not None:
                 logger.error("Discourse API error response: %s", e.response.text) # Use lazy formatting for logging
-            raise # Re-raise the exception after logging
+            # Ensure this raises DiscourseAPIError
+            raise DiscourseAPIError(f"Discourse API communication error: {e}")
 
     def create_user(self, user):
         """
@@ -80,9 +81,13 @@ class DiscourseAPI:
         generated_password = generate_random_password() # Correctly call the function
         active_user = True
 
+        # Provide a placeholder email if the Django user's email is empty
+        user_email = user.email if user.email else f"{user.username}@example.com"
+        # --- MODIFICATION ENDS HERE ---
+
         data = {
             'username': user.username,
-            'email': user.email,
+            'email': user_email,
             'name': user.get_full_name() or user.username,
             'password': generated_password, # <<< YOU MUST ENSURE THIS IS A REAL PLAINTEXT PASSWORD
             'active':active_user,
@@ -97,19 +102,25 @@ class DiscourseAPI:
             # Check if Discourse API reported overall success
             if response.get('success') is True:
                 if 'id' in response:
+                    discourse_user_id = response['id']
                     logger.info("Discourse user %s created with ID: %s", user.username, response['id']) # Use lazy formatting
-                    return response['id'] 
+                    return discourse_user_id 
                 else:
                     logger.warning("Discourse user creation successful for %s but no ID returned in direct response. Full response: %s", user.username, response) # Use lazy formatting
                     return True 
             else:
                 error_message = response.get('message', 'Discourse API reported an unknown error during user creation.')
                 logger.error("Discourse user creation failed for %s: %s. Full response: %s", user.username, error_message, response) # Use lazy formatting
-                raise Exception(f"Discourse user creation failed: {error_message}") # pylint: disable=broad-exception-raised
-                
-        except Exception as e: # pylint: disable=broad-exception-caught
-            logger.error("An unexpected error occurred during Discourse create_user for %s: %s", user.username, e) # Use lazy formatting
-            raise
+                raise DiscourseAPIError(f"Discourse user creation failed: {error_message}")
+
+        except requests.exceptions.RequestException as e:
+            logger.error("Discourse API request failed during creation for %s: %s", user.username, e)
+            # Ensure this re-raises DiscourseAPIError
+            raise DiscourseAPIError(f"Discourse API communication error during user creation: {e}")
+        except Exception as e:
+            logger.error("An unexpected error occurred during Discourse create_user for %s: %s", user.username, e)
+            # Ensure this re-raises DiscourseAPIError
+            raise DiscourseAPIError(f"Unexpected error during user creation: {e}")        
 
     def update_user(self, user):
         """
